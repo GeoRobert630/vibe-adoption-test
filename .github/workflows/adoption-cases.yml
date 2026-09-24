@@ -1,8 +1,7 @@
 # Fresh external adoption test for Vibe-Code Engineering (Security CI + Quality CI accessibility + Quality CI
 # performance + final Engineering enforcement). engineering-ci.yml is an unchanged copy of the canonical workflow
-# tools/engineering-ci/examples/github-actions-engineering-ci.yml at 70d52f8 (SARIF upload-boundary fix, not yet
-# released; previous release engineering-ci-v1.1 = 62461a6); its tooling pins are released versions
-# (security-baseline-v1, quality-ci-v1.1, quality-ci-v1.2).
+# tools/engineering-ci/examples/github-actions-engineering-ci.yml at release tag engineering-ci-v1.2 (70d52f8); its
+# tooling pins are released versions (security-baseline-v1, quality-ci-v1.1, quality-ci-v1.2).
 #
 #   case            security  accessibility  performance  final  enforce
 #   clean           PASS      PASS           PASS         PASS   false
