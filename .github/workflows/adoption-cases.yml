@@ -1,0 +1,70 @@
+# Fresh external adoption test for Vibe-Code Engineering (Security CI + Quality CI accessibility + Quality CI
+# performance + final Engineering enforcement). engineering-ci.yml is an unchanged copy of the canonical workflow
+# tools/engineering-ci/examples/github-actions-engineering-ci.yml at release tag engineering-ci-v1.1 (62461a6); its
+# tooling pins are released versions (security-baseline-v1, quality-ci-v1.1, quality-ci-v1.2).
+#
+#   case            security  accessibility  performance  final  enforce
+#   clean           PASS      PASS           PASS         PASS   false
+#   vulnerable      FAIL      PASS           PASS         FAIL   false
+#   inaccessible    PASS      FAIL           PASS         FAIL   false
+#   slow            PASS      PASS           FAIL         FAIL   false
+#   all-fail        FAIL      FAIL           FAIL         FAIL   false
+#   clean-enforced  PASS      PASS           PASS         PASS   true (default) - must still succeed
+#
+# enforce: false keeps FAIL cases from failing their own call; the check job then asserts every expected result.
+# enforce: true on a failing case is exercised separately in adoption-enforced.yml (that run is expected to FAIL).
+# No runtime target (Authentication / Session / Authorization must be NOT VERIFIED). No credentials or secrets.
+name: adoption-cases
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  clean:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/clean, quality_site_dir: site, artifact_suffix: -clean, enforce: false}
+  vulnerable:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/vulnerable, quality_site_dir: site, artifact_suffix: -vulnerable, enforce: false}
+  inaccessible:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/inaccessible, quality_site_dir: site, artifact_suffix: -inaccessible, enforce: false}
+  slow:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/slow, quality_site_dir: site, quality_pages: "/slow.html", artifact_suffix: -slow, enforce: false}
+  all-fail:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/all-fail, quality_site_dir: site, quality_pages: "/ /slow.html", artifact_suffix: -all-fail, enforce: false}
+  clean-enforced:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/clean, quality_site_dir: site, artifact_suffix: -clean-enforced}
+
+  check:
+    name: Check adoption results
+    needs: [clean, vulnerable, inaccessible, slow, all-fail, clean-enforced]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download all case reports
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Check every gate, SARIF namespace and coverage status
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: python3 .github/adoption/check.py cases artifacts

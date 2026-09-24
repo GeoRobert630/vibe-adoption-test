@@ -1,0 +1,2 @@
+# Fixture bytes are measured exactly by the performance budgets; keep them byte-for-byte.
+cases/** -text

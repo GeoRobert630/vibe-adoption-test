@@ -1,0 +1,40 @@
+# enforce: true evidence. Runs the unchanged canonical engineering-ci.yml on the slow case with the DEFAULT enforce
+# (true). All three gates must execute (security and accessibility PASS, performance FAIL) and the final Engineering
+# enforcement step must FAIL - so this workflow run is EXPECTED TO FAIL. The check job only verifies the recorded
+# outputs; it cannot and does not turn the run green.
+name: adoption-enforced
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  slow-enforced:
+    uses: ./.github/workflows/engineering-ci.yml
+    with: {project_path: cases/slow, quality_site_dir: site, quality_pages: "/slow.html", artifact_suffix: -slow-enforced}
+
+  check:
+    name: Check enforced failure
+    needs: [slow-enforced]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download reports
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Check outputs of the enforced run
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/adoption/check.py enforced artifacts
