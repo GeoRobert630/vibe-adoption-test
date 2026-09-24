@@ -1,7 +1,8 @@
 # Fresh external adoption test for Vibe-Code Engineering (Security CI + Quality CI accessibility + Quality CI
 # performance + final Engineering enforcement). engineering-ci.yml is an unchanged copy of the canonical workflow
-# tools/engineering-ci/examples/github-actions-engineering-ci.yml at release tag engineering-ci-v1.1 (62461a6); its
-# tooling pins are released versions (security-baseline-v1, quality-ci-v1.1, quality-ci-v1.2).
+# tools/engineering-ci/examples/github-actions-engineering-ci.yml at 70d52f8 (SARIF upload-boundary fix, not yet
+# released; previous release engineering-ci-v1.1 = 62461a6); its tooling pins are released versions
+# (security-baseline-v1, quality-ci-v1.1, quality-ci-v1.2).
 #
 #   case            security  accessibility  performance  final  enforce
 #   clean           PASS      PASS           PASS         PASS   false
@@ -13,6 +14,8 @@
 #
 # enforce: false keeps FAIL cases from failing their own call; the check job then asserts every expected result.
 # enforce: true on a failing case is exercised separately in adoption-enforced.yml (that run is expected to FAIL).
+# Code scanning: every case x gate must have its own category (vibe-code-engineering-<gate>-<case>, which GitHub may
+# report with the trailing "/" of runs[].automationDetails.id) holding only that gate's upload for that case.
 # No runtime target (Authentication / Session / Authorization must be NOT VERIFIED). No credentials or secrets.
 name: adoption-cases
 
@@ -60,6 +63,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Self-test the code-scanning category assertions
+        run: python3 -m unittest discover -s .github/adoption -p "test_*.py" -v
 
       - name: Check every gate, SARIF namespace and coverage status
         env:

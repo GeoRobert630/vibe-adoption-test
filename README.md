@@ -4,10 +4,15 @@ Fresh external adoption test for [GeoRobert630/vibe-code-engineering](https://gi
 a new project adopting the complete system through the **canonical workflow** only.
 
 - `.github/workflows/engineering-ci.yml` - unchanged copy of `tools/engineering-ci/examples/github-actions-engineering-ci.yml`
-  at release tag `engineering-ci-v1.1` (`62461a6`). It pins released tooling: Security `bd71c46` (`security-baseline-v1`),
+  at `70d52f8` (SARIF upload-boundary fix, validated here before release; previous release `engineering-ci-v1.1` =
+  `62461a6`). It pins released tooling: Security `bd71c46` (`security-baseline-v1`),
   Accessibility `fa816aa` (`quality-ci-v1.1`), Performance `c6b82c0` (`quality-ci-v1.2`).
 - `.github/workflows/adoption-cases.yml` - calls it once per case with real tools and checks every result
-  (`.github/adoption/check.py`): outputs, report artifacts, SARIF namespaces, code-scanning categories, coverage statuses.
+  (`.github/adoption/check.py`, self-tested by `.github/adoption/test_check.py`): outputs, report artifacts, SARIF
+  namespaces, code-scanning categories, coverage statuses. Each case and gate must upload to its own code-scanning
+  category `vibe-code-engineering-{security,quality-accessibility,quality-performance}-<case>`; GitHub keys it by
+  `runs[].automationDetails.id` = category + `/`, so the check compares categories with exactly one trailing `/`
+  dropped and still fails on any missing, shared or foreign category.
 - `.github/workflows/adoption-enforced.yml` - the slow case with the default `enforce: true`; **expected to FAIL**
   (performance FAIL blocks final enforcement while all three gates still run).
 

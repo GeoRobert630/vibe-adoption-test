@@ -12,12 +12,10 @@ import time
 import urllib.request
 from pathlib import Path
 
-mode, art = sys.argv[1], Path(sys.argv[2])
-needs = json.loads(os.environ["NEEDS"])
 errors: list[str] = []
 NV = {"authentication": "NOT VERIFIED", "session": "NOT VERIFIED", "authorization": "NOT VERIFIED"}
 
-CASES = {  # case: (security, accessibility, performance, overall, enforced, expected job result)
+ALL_CASES = {  # case: (security, accessibility, performance, overall, enforced, expected job result)
     "clean": ("PASS", "PASS", "PASS", "PASS", False, "success"),
     "vulnerable": ("FAIL", "PASS", "PASS", "FAIL", False, "success"),
     "inaccessible": ("PASS", "FAIL", "PASS", "FAIL", False, "success"),
@@ -25,10 +23,18 @@ CASES = {  # case: (security, accessibility, performance, overall, enforced, exp
     "all-fail": ("FAIL", "FAIL", "FAIL", "FAIL", False, "success"),
     "clean-enforced": ("PASS", "PASS", "PASS", "PASS", True, "success"),
 }
-if mode == "enforced":
-    CASES = {"slow-enforced": ("PASS", "PASS", "FAIL", "FAIL", True, "failure")}
+ENFORCED_CASES = {"slow-enforced": ("PASS", "PASS", "FAIL", "FAIL", True, "failure")}
 
 SEC_PREFIXES = ("P2-", "RT-", "AI-")
+
+# Code-scanning category prefix per gate (engineering-ci.yml appends artifact_suffix "-<case>"), and the report file
+# whose SARIF that gate uploads.
+FAMILIES = {
+    "security": ("vibe-code-engineering-security", Path("security-reports{sfx}/security.sarif")),
+    "accessibility": ("vibe-code-engineering-quality-accessibility", Path("quality-reports{sfx}/accessibility.sarif")),
+    "performance": ("vibe-code-engineering-quality-performance", Path("performance-reports{sfx}/performance.sarif")),
+}
+CASES_WORKFLOW = ".github/workflows/adoption-cases.yml"
 
 
 def err(msg):
@@ -42,7 +48,7 @@ def sarif_ids(path: Path):
     return doc, ids
 
 
-def check_case(case, exp):
+def check_case(case, exp, needs, art):
     sec, acc, prf, overall, enforced, job_result = exp
     n = needs.get(case, {})
     o = n.get("outputs", {})
@@ -86,6 +92,7 @@ def check_case(case, exp):
     for name, status, ids in (("security", sec, sids), ("accessibility", acc, aids), ("performance", prf, pids)):
         if status == "FAIL" and not ids:
             err(f"{case}: {name} FAIL but its SARIF has no results")
+    # The report artifacts keep the tools' original SARIF; only the upload copy carries the per-case category.
     autos = {d["runs"][0].get("automationDetails", {}).get("id") for d in (adoc, pdoc)}
     if autos != {"vibe-code-engineering/quality/accessibility/", "vibe-code-engineering/quality/performance/"}:
         err(f"{case}: quality SARIF automation ids {autos}")
@@ -105,27 +112,113 @@ def check_case(case, exp):
         "timing_reliability": rel, "verification": summary.get("verification")}, sort_keys=True))
 
 
-for case, exp in CASES.items():
-    check_case(case, exp)
+# --- code scanning -------------------------------------------------------------------------------------------------
 
-if mode == "cases":
-    # All three SARIF families uploaded for this commit under distinct code-scanning categories.
-    want = {f"{fam}-{c}" for c in CASES for fam in ("vibe-code-engineering-security", "vibe-code-engineering-quality-accessibility",
-                                                    "vibe-code-engineering-quality-performance")}
-    cats: set[str] = set()
-    for _ in range(12):   # upload processing is asynchronous; wait up to ~2 minutes (not a retry of any scan)
-        req = urllib.request.Request(f"https://api.github.com/repos/{os.environ['REPO']}/code-scanning/analyses?per_page=100",
-                                     headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                                              "Accept": "application/vnd.github+json"})
+def canonical_category(category: str) -> str:
+    """Category as GitHub keys it: upload-sarif stores category X as runs[].automationDetails.id "X/" and the analyses
+    API may report either "X" or "X/". Exactly one trailing "/" is dropped; nothing else is normalised, so two
+    categories that differ in any other character stay distinct."""
+    return category[:-1] if category.endswith("/") else category
+
+
+def expected_categories(cases) -> dict[str, tuple[str, str]]:
+    """Canonical category -> (case, gate) for every expected upload. Any two expected uploads that would share a
+    canonical category (across gates or across cases) are reported as a collision."""
+    owners: dict[str, list[tuple[str, str]]] = {}
+    for case in cases:
+        for gate, (prefix, _) in FAMILIES.items():
+            owners.setdefault(canonical_category(f"{prefix}-{case}"), []).append((case, gate))
+    for cat, who in owners.items():
+        if len(who) > 1:
+            err(f"expected code-scanning category collision: {cat!r} shared by {who}")
+    return {cat: who[0] for cat, who in owners.items()}
+
+
+def sarif_expectations(cases, art: Path) -> dict[tuple[str, str], tuple[str, int]]:
+    """(case, gate) -> (tool driver name, result count) of the SARIF that gate uploaded (from the report artifact)."""
+    out = {}
+    for case in cases:
+        for gate, (_, rel) in FAMILIES.items():
+            p = art / str(rel).format(sfx=f"-{case}")
+            if p.is_file():
+                doc = json.loads(p.read_text(encoding="utf-8"))
+                out[(case, gate)] = (doc["runs"][0]["tool"]["driver"]["name"],
+                                     sum(len(r.get("results", [])) for r in doc["runs"]))
+    return out
+
+
+def check_code_scanning(analyses, sha, cases, sarif_exp) -> int:
+    """Checks the code-scanning analyses of commit `sha`. Every expected (case, gate) must have its own canonical
+    category holding only analyses of that gate's tool with that case's result count; no analysis of another workflow
+    may land in one of those categories, and no adoption-cases analysis may use any other category. Returns the
+    number of expected categories that are present and correct."""
+    want = expected_categories(cases)
+    got: dict[str, list[dict]] = {}
+    for a in analyses:
+        if a.get("commit_sha") == sha:
+            got.setdefault(canonical_category(a.get("category", "")), []).append(a)
+    ok = 0
+    for cat, (case, gate) in sorted(want.items()):
+        found = got.get(cat, [])
+        if not found:
+            err(f"code-scanning analysis missing for {case}/{gate}: category {cat!r}")
+            continue
+        tool, count = sarif_exp.get((case, gate), (None, None))
+        bad = False
+        for a in found:
+            key, name, n = a.get("analysis_key", ""), a.get("tool", {}).get("name"), a.get("results_count")
+            if not key.startswith(f"{CASES_WORKFLOW}:"):
+                err(f"code-scanning category collision: {cat!r} ({case}/{gate}) also used by {key!r}")
+                bad = True
+            elif name != tool or n != count or a.get("error"):
+                err(f"code-scanning {cat!r} ({case}/{gate}): tool {name!r} with {n} result(s)"
+                    f"{' error ' + repr(a['error']) if a.get('error') else ''}; expected {tool!r} with {count}")
+                bad = True
+        ok += not bad
+    for cat, found in sorted(got.items()):
+        ours = [a for a in found if a.get("analysis_key", "").startswith(f"{CASES_WORKFLOW}:")]
+        if cat not in want and ours:
+            err(f"unexpected code-scanning category {cat!r} for this commit from {CASES_WORKFLOW} "
+                f"({len(ours)} analysis/analyses) - uploads are not isolated per case and gate")
+    return ok
+
+
+def fetch_analyses(repo: str, token: str) -> list[dict]:
+    out: list[dict] = []
+    for page in range(1, 11):
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/code-scanning/analyses?per_page=100&page={page}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=60) as resp:
-            cats = {a.get("category", "") for a in json.load(resp) if a.get("commit_sha") == os.environ["SHA"]}
-        if want <= cats:
+            batch = json.load(resp)
+        out += batch
+        if len(batch) < 100:
             break
-        time.sleep(10)
-    missing = sorted(want - cats)
-    if missing:
-        err(f"code-scanning categories missing for this commit: {missing}")
-    print(f"::notice title=code scanning::{len(want & cats)}/{len(want)} expected categories present")
+    return out
 
-print(f"::notice title=adoption {mode}::{'PASS' if not errors else 'FAIL'} ({len(errors)} problem(s))")
-sys.exit(1 if errors else 0)
+
+def main(argv) -> int:
+    mode, art = argv[1], Path(argv[2])
+    needs = json.loads(os.environ["NEEDS"])
+    cases = ENFORCED_CASES if mode == "enforced" else ALL_CASES
+    for case, exp in cases.items():
+        check_case(case, exp, needs, art)
+
+    if mode == "cases":
+        sha, sarif_exp = os.environ["SHA"], sarif_expectations(cases, art)
+        want = {canonical_category(f"{p}-{c}") for c in cases for p, _ in FAMILIES.values()}
+        analyses: list[dict] = []
+        for _ in range(12):   # upload processing is asynchronous; wait up to ~2 minutes (not a retry of any scan)
+            analyses = fetch_analyses(os.environ["REPO"], os.environ["GH_TOKEN"])
+            if want <= {canonical_category(a.get("category", "")) for a in analyses if a.get("commit_sha") == sha}:
+                break
+            time.sleep(10)
+        ok = check_code_scanning(analyses, sha, cases, sarif_exp)
+        print(f"::notice title=code scanning::{ok}/{len(want)} expected categories present, distinct and correct")
+
+    print(f"::notice title=adoption {mode}::{'PASS' if not errors else 'FAIL'} ({len(errors)} problem(s))")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
